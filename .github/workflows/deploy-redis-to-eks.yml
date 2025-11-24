@@ -1,0 +1,64 @@
+name: Deploy Redis to EKS
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Redis Docker Image"]
+    types:
+      - completed
+  workflow_dispatch:
+
+env:
+  EKS_CLUSTER_NAME: bosi-eks
+  EKS_REGION: us-east-1  # 替换为你的EKS集群所在区域
+  DEPLOYMENT_NAMESPACE: default
+  IMAGE_NAME: yanhu12/redis-custom
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.EKS_REGION }}
+      
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.34.0' # 与你的EKS集群版本匹配
+      
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER_NAME }} \
+            --region ${{ env.EKS_REGION }}
+            
+      - name: Pull latest image to get digest
+        run: |
+          docker pull ${{ env.IMAGE_NAME }}:latest
+          IMAGE_DIGEST=$(docker inspect ${{ env.IMAGE_NAME }}:latest --format='{{index .RepoDigests 0}}')
+          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> $GITHUB_ENV
+      
+      - name: Deploy to EKS
+        run: |
+          echo "Deploying Redis with image: ${{ env.IMAGE_NAME }}:latest"
+          
+          # 应用配置
+          kubectl apply -f k8s/redis-configmap.yaml -n ${{ env.DEPLOYMENT_NAMESPACE }}
+          kubectl apply -f k8s/redis-deployment.yaml -n ${{ env.DEPLOYMENT_NAMESPACE }}
+          kubectl apply -f k8s/redis-service.yaml -n ${{ env.DEPLOYMENT_NAMESPACE }}
+          
+          # 验证部署
+          echo "Waiting for deployment to complete..."
+          kubectl rollout status deployment/redis -n ${{ env.DEPLOYMENT_NAMESPACE }} --timeout=300s
+          
+          echo "Redis deployment status:"
+          kubectl get pods -l app=redis -n ${{ env.DEPLOYMENT_NAMESPACE }}
+          kubectl get svc redis-service -n ${{ env.DEPLOYMENT_NAMESPACE }}
